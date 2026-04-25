@@ -565,6 +565,219 @@ async function testLegacyActiveHttpProfileMigratesToggleToEnabled() {
   assert.equal(storageArea.state.customProviderAllowHttpMigrated, true);
 }
 
+async function testCodexAuthJsonNormalizesAndSavesTokens() {
+  const authJson = JSON.stringify({
+    tokens: {
+      access_token: "codex-access",
+      refresh_token: "codex-refresh",
+      account_id: "acc_123"
+    },
+    last_refresh: "2026-04-25T00:00:00.000Z"
+  });
+  const storageArea = createStorageArea({});
+  const models = loadModels(storageArea);
+  await waitForMicrotasks();
+
+  const normalized = models.normalizeConfig({
+    authMode: models.AUTH_MODE_CODEX,
+    apiKey: authJson,
+    defaultModel: "gpt-5.5"
+  });
+
+  assert.equal(normalized.authMode, models.AUTH_MODE_CODEX);
+  assert.equal(normalized.format, models.OPENAI_RESPONSES_FORMAT);
+  assert.equal(normalized.baseUrl, models.CODEX_DEFAULT_BASE_URL);
+  assert.equal(normalized.apiKey, "codex-access");
+  assert.equal(normalized.codexRefreshToken, "codex-refresh");
+  assert.equal(normalized.codexAccountId, "acc_123");
+
+  await models.saveProviderProfile({
+    ...createProfile({
+      authMode: models.AUTH_MODE_CODEX,
+      format: models.OPENAI_RESPONSES_FORMAT,
+      baseUrl: "",
+      apiKey: authJson,
+      defaultModel: "gpt-5.5"
+    })
+  }, {
+    profileId: "provider_codex",
+    storageArea
+  });
+
+  assert.equal(storageArea.state.customProviderProfiles[0].apiKey, "codex-access");
+  assert.equal(storageArea.state.customProviderProfiles[0].codexRefreshToken, "codex-refresh");
+  assert.equal(storageArea.state.customProviderProfiles[0].codexAccountId, "acc_123");
+  assert.equal(storageArea.state.customProviderConfig.baseUrl, models.CODEX_DEFAULT_BASE_URL);
+}
+
+async function testCodexProbeUsesStreamingResponsesAndAccountHeader() {
+  const storageArea = createStorageArea({});
+  const models = loadModels(storageArea);
+  await waitForMicrotasks();
+  let capturedCall = null;
+  const fetchImpl = async (input, init) => {
+    capturedCall = {
+      url: String(input),
+      headers: init.headers,
+      body: JSON.parse(init.body)
+    };
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get() {
+          return "text/event-stream";
+        }
+      },
+      async text() {
+        return [
+          "event: response.output_text.delta",
+          "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}",
+          "",
+          "data: [DONE]",
+          ""
+        ].join("\n");
+      }
+    };
+  };
+
+  const result = await models.probeProviderModel(createProfile({
+    authMode: models.AUTH_MODE_CODEX,
+    format: models.OPENAI_RESPONSES_FORMAT,
+    baseUrl: models.CODEX_DEFAULT_BASE_URL,
+    apiKey: "codex-access",
+    codexAccountId: "acc_123",
+    defaultModel: "gpt-5.5"
+  }), {
+    storageArea,
+    fetchImpl
+  });
+
+  assert.equal(capturedCall.url, `${models.CODEX_DEFAULT_BASE_URL}/responses`);
+  assert.equal(capturedCall.headers.Authorization, "Bearer codex-access");
+  assert.equal(capturedCall.headers["ChatGPT-Account-ID"], "acc_123");
+  assert.equal(capturedCall.headers.Accept, "text/event-stream, application/json");
+  assert.equal(capturedCall.body.stream, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(capturedCall.body, "max_output_tokens"), false);
+  assert.equal(Array.isArray(capturedCall.body.input), true);
+  assert.equal(result.replyText, "OK");
+  assert.equal(result.ok, true);
+}
+
+async function testCodexFetchModelsUsesClientVersionAndModelsPayload() {
+  const storageArea = createStorageArea({});
+  const models = loadModels(storageArea);
+  await waitForMicrotasks();
+  let capturedCall = null;
+  const fetchImpl = async (input, init) => {
+    capturedCall = {
+      url: String(input),
+      headers: init.headers
+    };
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get() {
+          return "application/json";
+        }
+      },
+      async text() {
+        return JSON.stringify({
+          models: [
+            {
+              slug: "gpt-5.5",
+              display_name: "GPT-5.5",
+              visibility: "list",
+              supported_in_api: true
+            },
+            {
+              slug: "gpt-hidden",
+              display_name: "Hidden",
+              visibility: "hide",
+              supported_in_api: true
+            },
+            {
+              slug: "gpt-unsupported",
+              display_name: "Unsupported",
+              visibility: "list",
+              supported_in_api: false
+            }
+          ]
+        });
+      }
+    };
+  };
+
+  const fetched = await models.fetchProviderModels(createProfile({
+    authMode: models.AUTH_MODE_CODEX,
+    format: models.OPENAI_RESPONSES_FORMAT,
+    baseUrl: models.CODEX_DEFAULT_BASE_URL,
+    apiKey: "codex-access",
+    codexAccountId: "acc_123",
+    defaultModel: "gpt-5.5"
+  }), {
+    storageArea,
+    fetchImpl
+  });
+
+  assert.match(capturedCall.url, /\/models\?client_version=0\.125\.0-alpha\.3$/);
+  assert.equal(capturedCall.headers.Authorization, "Bearer codex-access");
+  assert.equal(capturedCall.headers["ChatGPT-Account-ID"], "acc_123");
+  assert.equal(fetched.length, 1);
+  assert.equal(fetched[0].value, "gpt-5.5");
+  assert.equal(fetched[0].label, "GPT-5.5");
+  assert.equal(fetched[0].manual, false);
+}
+
+async function testCodexRefreshPersistsUpdatedTokens() {
+  const codexProfile = createProfile({
+    authMode: "codex",
+    format: "openai_responses",
+    baseUrl: "https://chatgpt.com/backend-api/codex",
+    apiKey: "old-access",
+    codexRefreshToken: "old-refresh",
+    codexAccountId: "acc_123",
+    defaultModel: "gpt-5.5"
+  });
+  const storageArea = createStorageArea({
+    customProviderProfiles: [codexProfile],
+    customProviderActiveProfileId: codexProfile.id,
+    customProviderConfig: projectProfileToConfig(codexProfile)
+  });
+  const models = loadModels(storageArea);
+  await waitForMicrotasks();
+  let refreshBody = null;
+  const fetchImpl = async (input, init) => {
+    assert.equal(String(input), "https://auth.openai.com/oauth/token");
+    refreshBody = JSON.parse(init.body);
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({
+          access_token: "new-access",
+          refresh_token: "new-refresh"
+        });
+      }
+    };
+  };
+
+  const refreshed = await models.refreshCodexAuthForConfig(codexProfile, {
+    profileId: codexProfile.id,
+    storageArea,
+    fetchImpl,
+    force: true
+  });
+
+  assert.equal(refreshBody.grant_type, "refresh_token");
+  assert.equal(refreshBody.refresh_token, "old-refresh");
+  assert.equal(refreshed.apiKey, "new-access");
+  assert.equal(refreshed.codexRefreshToken, "new-refresh");
+  assert.equal(storageArea.state.customProviderProfiles[0].apiKey, "new-access");
+  assert.equal(storageArea.state.customProviderConfig.apiKey, "new-access");
+}
+
 async function main() {
   await testSavingActiveProfileSyncsSelectedModels();
   await testSavingNonModelFieldsKeepsExistingStickySelection();
@@ -580,6 +793,10 @@ async function main() {
   await testFetchAndProbeAllowHttpByDefault();
   await testFetchAndProbeRejectWhenHttpExplicitlyDisabled();
   await testLegacyActiveHttpProfileMigratesToggleToEnabled();
+  await testCodexAuthJsonNormalizesAndSavesTokens();
+  await testCodexProbeUsesStreamingResponsesAndAccountHeader();
+  await testCodexFetchModelsUsesClientVersionAndModelsPayload();
+  await testCodexRefreshPersistsUpdatedTokens();
   console.log("custom-provider-models sync regression tests passed");
 }
 

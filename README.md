@@ -58,6 +58,8 @@
 - `API Key`
 - `模型`
 
+如果要使用 Codex/ChatGPT 登录认证，请把认证方式选为 `Codex login`，`供应商格式` 保持 `OpenAI Responses API`，Base URL 使用 `https://chatgpt.com/backend-api/codex`。本机先运行 `codex login`，然后把 `~/.codex/auth.json` 内容或 access token 粘贴到凭据输入框。
+
 保存并应用后，关闭并重新打开一次侧边栏即可生效。
 
 ### 3. 推荐设置

@@ -58,6 +58,8 @@ Open the extension options page and go to `Model provider` in the left menu. Cre
 - `API Key`
 - `Model`
 
+To use Codex/ChatGPT login credentials, choose `Codex login` as the authentication mode, keep `Provider format` on `OpenAI Responses API`, and use `https://chatgpt.com/backend-api/codex` as the base URL. Run `codex login` locally, then paste the contents of `~/.codex/auth.json` or the access token into the credential field.
+
 After saving and applying the configuration, close and reopen the sidebar once to make it take effect.
 
 ### 3. Recommended setting

@@ -77,6 +77,8 @@
     "token",
     "secret",
     "password",
+    "codexrefreshtoken",
+    "codexaccesstoken",
     "currentapikey",
     "originalapikey",
   ]);
@@ -183,8 +185,11 @@
           ? value.contextWindow
           : value?.contextWindow || undefined,
       name: sanitizeDebugExportString(value?.name || "", "name"),
+      authMode: sanitizeDebugExportString(value?.authMode || "", "authMode"),
       fetchedModelCount: fetchedModels.length,
       hasApiKey: !!value?.apiKey,
+      hasCodexRefreshToken: !!value?.codexRefreshToken,
+      hasCodexAccountId: !!value?.codexAccountId,
       hasBaseUrl: !!value?.baseUrl,
     };
   }
@@ -265,11 +270,16 @@
       providerNameLabel: "Provider name",
       providerNamePlaceholder: "OpenRouter / Private gateway",
       providerFormatLabel: "Provider format",
+      authModeLabel: "Authentication",
+      authModeApiKey: "API key",
+      authModeCodex: "Codex login",
       baseUrlLabel: "Base URL",
       baseUrlPlaceholder: "https://api.openai.com/v1",
       requestUrlPrefix: "Request URL: ",
       apiKeyLabel: "API key",
       apiKeyPlaceholder: "provider key",
+      codexAuthLabel: "Codex auth JSON / access token",
+      codexAuthPlaceholder: "Paste ~/.codex/auth.json or a Codex access token",
       showApiKey: "Show API key",
       hideApiKey: "Hide API key",
       defaultModelLabel: "Model",
@@ -555,6 +565,13 @@
 
   const helpers = globalThis.CustomProviderModels || {};
   const DEFAULT_FORMAT = helpers.DEFAULT_FORMAT || "anthropic";
+  const AUTH_MODE_API_KEY = helpers.AUTH_MODE_API_KEY || "api_key";
+  const AUTH_MODE_CODEX = helpers.AUTH_MODE_CODEX || "codex";
+  const DEFAULT_AUTH_MODE = helpers.DEFAULT_AUTH_MODE || AUTH_MODE_API_KEY;
+  const CODEX_DEFAULT_BASE_URL =
+    helpers.CODEX_DEFAULT_BASE_URL || "https://chatgpt.com/backend-api/codex";
+  const OPENAI_RESPONSES_FORMAT =
+    helpers.OPENAI_RESPONSES_FORMAT || "openai_responses";
   const DEFAULT_CONTEXT_WINDOW = helpers.DEFAULT_CONTEXT_WINDOW || 200000;
   const DEFAULT_MAX_OUTPUT_TOKENS = helpers.DEFAULT_MAX_OUTPUT_TOKENS || 10000;
   const MIN_CONTEXT_WINDOW = 20000;
@@ -974,9 +991,13 @@
     function () {
       return {
         name: "",
+        authMode: DEFAULT_AUTH_MODE,
         format: DEFAULT_FORMAT,
         baseUrl: "",
         apiKey: "",
+        codexAccountId: "",
+        codexRefreshToken: "",
+        codexLastRefresh: "",
         defaultModel: "",
         fastModel: "",
         reasoningEffort: "medium",
@@ -1051,14 +1072,36 @@
     helpers.normalizeConfig ||
     function (raw, fallbackEnabled) {
       const source = raw && typeof raw === "object" ? raw : {};
+      const authMode =
+        String(source.authMode || "").trim().toLowerCase() === AUTH_MODE_CODEX
+          ? AUTH_MODE_CODEX
+          : DEFAULT_AUTH_MODE;
       return {
         name: String(source.name || "").trim(),
+        authMode,
         format:
-          String(source.format || DEFAULT_FORMAT).trim() || DEFAULT_FORMAT,
-        baseUrl: String(source.baseUrl || "")
+          authMode === AUTH_MODE_CODEX
+            ? OPENAI_RESPONSES_FORMAT
+            : String(source.format || DEFAULT_FORMAT).trim() || DEFAULT_FORMAT,
+        baseUrl: String(
+          source.baseUrl ||
+            (authMode === AUTH_MODE_CODEX ? CODEX_DEFAULT_BASE_URL : ""),
+        )
           .trim()
           .replace(/\/+$/, ""),
         apiKey: String(source.apiKey || "").trim(),
+        codexAccountId:
+          authMode === AUTH_MODE_CODEX
+            ? String(source.codexAccountId || "").trim()
+            : "",
+        codexRefreshToken:
+          authMode === AUTH_MODE_CODEX
+            ? String(source.codexRefreshToken || "").trim()
+            : "",
+        codexLastRefresh:
+          authMode === AUTH_MODE_CODEX
+            ? String(source.codexLastRefresh || "").trim()
+            : "",
         defaultModel: String(source.defaultModel || "").trim(),
         fastModel: String(
           source.fastModel || source.small_fast_model || "",
@@ -3541,6 +3584,10 @@
       ["openai_chat", "OpenAI Chat Completions"],
       ["openai_responses", "OpenAI Responses API"],
     ];
+    const providerAuthModeOptions = [
+      [AUTH_MODE_API_KEY, strings.authModeApiKey],
+      [AUTH_MODE_CODEX, strings.authModeCodex],
+    ];
     const identityGrid = createNode("div", "cp-page-grid cp-page-grid-2");
     const nameField = createNode("label", "cp-page-field");
     const nameInput = createNode(
@@ -3567,8 +3614,24 @@
       createNode("span", "cp-page-label", strings.providerFormatLabel),
     );
     formatField.appendChild(formatSelect);
+    const authModeField = createNode("label", "cp-page-field");
+    const authModeSelect = createNode(
+      "select",
+      `cp-page-select ${SHARED_FRAME_CLASS}`,
+    );
+    providerAuthModeOptions.forEach(function (option) {
+      const node = document.createElement("option");
+      node.value = option[0];
+      node.textContent = option[1];
+      authModeSelect.appendChild(node);
+    });
+    authModeField.appendChild(
+      createNode("span", "cp-page-label", strings.authModeLabel),
+    );
+    authModeField.appendChild(authModeSelect);
     identityGrid.appendChild(nameField);
     identityGrid.appendChild(formatField);
+    identityGrid.appendChild(authModeField);
     const baseUrlField = createNode("label", "cp-page-field");
     const baseUrlInput = createNode(
       "input",
@@ -3611,9 +3674,8 @@
         preventScroll: true,
       });
     });
-    apiKeyField.appendChild(
-      createNode("span", "cp-page-label", strings.apiKeyLabel),
-    );
+    const apiKeyLabel = createNode("span", "cp-page-label", strings.apiKeyLabel);
+    apiKeyField.appendChild(apiKeyLabel);
     apiKeyShell.appendChild(apiKeyInput);
     apiKeyShell.appendChild(apiKeyToggle);
     apiKeyField.appendChild(apiKeyShell);
@@ -4506,6 +4568,7 @@
       isLoadingSnapshot: false,
     };
     const formatDropdown = enhanceSelect(formatSelect);
+    const authModeDropdown = enhanceSelect(authModeSelect);
     const modelDropdown = enhanceSelect(modelSelect);
     const fastModelDropdown = enhanceSelect(fastModelSelect);
     const reasoningDropdown = enhanceSelect(reasoningSelect);
@@ -4600,10 +4663,15 @@
     }
     function getProviderFetchIdentity(config) {
       const next = normalizeConfig(config, false);
+      const credentialKey =
+        next.authMode === AUTH_MODE_CODEX
+          ? next.codexAccountId || next.codexRefreshToken || next.apiKey
+          : next.apiKey;
       return [
+        next.authMode || DEFAULT_AUTH_MODE,
         next.format || DEFAULT_FORMAT,
         String(next.baseUrl || "").trim(),
-        String(next.apiKey || "").trim(),
+        String(credentialKey || "").trim(),
       ].join("::");
     }
     let cachedModelsHydrationToken = 0;
@@ -4613,7 +4681,7 @@
       fastSelectedValue,
     ) {
       const identity = getProviderFetchIdentity(config);
-      if (!identity || identity === `${DEFAULT_FORMAT}:::`) {
+      if (!identity || identity === `${DEFAULT_AUTH_MODE}::${DEFAULT_FORMAT}:::`) {
         return;
       }
       const token = ++cachedModelsHydrationToken;
@@ -7052,10 +7120,30 @@
         ? "false"
         : "true";
     }
+    function syncAuthModeUi(fillDefaults) {
+      const isCodex = authModeSelect.value === AUTH_MODE_CODEX;
+      apiKeyLabel.textContent = isCodex
+        ? strings.codexAuthLabel
+        : strings.apiKeyLabel;
+      apiKeyInput.placeholder = isCodex
+        ? strings.codexAuthPlaceholder
+        : strings.apiKeyPlaceholder;
+      if (isCodex) {
+        if (fillDefaults && !baseUrlInput.value.trim()) {
+          baseUrlInput.value = CODEX_DEFAULT_BASE_URL;
+        }
+        if (formatSelect.value !== OPENAI_RESPONSES_FORMAT) {
+          formatSelect.value = OPENAI_RESPONSES_FORMAT;
+          formatDropdown.refresh();
+        }
+      }
+      updateRequestPreview();
+    }
     function readForm() {
       const next = normalizeConfig(
         {
           name: nameInput.value,
+          authMode: authModeSelect.value,
           format: formatSelect.value,
           baseUrl: baseUrlInput.value,
           apiKey: apiKeyInput.value,
@@ -7076,10 +7164,13 @@
     function writeForm(config) {
       const next = normalizeConfig(config, false);
       nameInput.value = next.name || "";
+      authModeSelect.value = next.authMode || DEFAULT_AUTH_MODE;
       formatSelect.value = next.format || DEFAULT_FORMAT;
       baseUrlInput.value = next.baseUrl || "";
       apiKeyInput.value = next.apiKey || "";
+      authModeDropdown.refresh();
       formatDropdown.refresh();
+      syncAuthModeUi(false);
       syncReasoningEditorControls(
         next.reasoningEffort || "medium",
         next.contextWindow,
@@ -7687,7 +7778,7 @@
         preventScroll: true,
       });
     });
-    [formatSelect, baseUrlInput, apiKeyInput].forEach(function (node) {
+    [authModeSelect, formatSelect, baseUrlInput, apiKeyInput].forEach(function (node) {
       node.addEventListener("change", clearModels);
       node.addEventListener("input", function () {
         if (state.availableModels.length) {
@@ -7702,6 +7793,12 @@
           function () {},
         );
       });
+    });
+    authModeSelect.addEventListener("change", function () {
+      syncAuthModeUi(true);
+      hydrateCachedModelsForConfig(readForm(), modelSelect.value || "").catch(
+        function () {},
+      );
     });
     [formatSelect, baseUrlInput].forEach(function (node) {
       node.addEventListener("change", updateRequestPreview);
