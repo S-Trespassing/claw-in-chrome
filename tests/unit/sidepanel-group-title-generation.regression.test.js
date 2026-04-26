@@ -21,13 +21,13 @@ function main() {
 
   assertIncludes(
     source,
-    "Think about it, then suggest a title based on the first message, putting it between <title> tags.",
+    "const r = __cpBuildTaskStyleGroupTitlePrompt(s, n);",
     "group title generator"
   );
 
   assertIncludes(
     source,
-    "Here is a clear, concise title for this browser automation conversation:\\n\\n<title>",
+    "Think like PageAgent naming an active browser task. Use the user's request as the main signal, then use page context only to make the title more specific. Put the final answer between <title> tags.",
     "group title generator"
   );
 
@@ -45,7 +45,13 @@ function main() {
 
   assertIncludes(
     source,
-    "return i ? t(i[1]) : t(n);",
+    "return o || __cpBuildTaskStyleGroupTitleFallback(s, n);",
+    "group title generator"
+  );
+
+  assertIncludes(
+    source,
+    "return __cpBuildTaskStyleGroupTitleFallback(s, n);",
     "group title generator"
   );
 
@@ -57,7 +63,7 @@ function main() {
 
   assertNotIncludes(
     source,
-    "Here is a concise task-style title for this browser tab group:\\n\\n<title>",
+    "Think about it, then suggest a title based on the first message, putting it between <title> tags.",
     "group title generator"
   );
 
