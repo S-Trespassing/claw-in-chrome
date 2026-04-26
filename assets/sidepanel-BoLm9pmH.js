@@ -87498,14 +87498,12 @@ async function lQ(e, t) {
   }
 }
 async function cQ(e, t, n = {}) {
+  const s = __cpExtractSessionDisplayText(e?.content, __CP_CHAT_SESSION_TEXT_LIMIT);
   try {
-    const s = __cpExtractSessionDisplayText(e?.content, __CP_CHAT_SESSION_TEXT_LIMIT);
     if (!s || s.trim() === "") {
       return "";
     }
-    const r = function (e) {
-      return `<conversation>\n\n${e}\n\n</conversation>\n\nThink about it, then suggest a title based on the first message, putting it between <title> tags.`;
-    }(s);
+    const r = __cpBuildTaskStyleGroupTitlePrompt(s, n);
     const i = [{
       role: "user",
       content: r
@@ -87514,7 +87512,7 @@ async function cQ(e, t, n = {}) {
       role: "assistant",
       content: "Here is a clear, concise title for this browser automation conversation:\n\n<title>"
     });
-    return function (e) {
+    const o = function (e) {
       const t = e => {
         const t = String(e || "").replace(/<\/?title>/gi, " ").replace(/<[^>]*>/g, " ").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
         return t && t.toLowerCase() !== "title" ? __cpTrimSessionText(__cpStripSessionDisplayArtifacts(t), __CP_GROUP_TITLE_LIMIT) : "";
@@ -87539,8 +87537,9 @@ async function cQ(e, t, n = {}) {
       system: "Act as an accurate and concise title generator for browser automation conversations.\nGenerate a <title> based on the first message in the conversation.\n\nBasic tips:\n- Focus on the main browser task or action being requested\n- Identify the key website, action, or goal from the message\n- The conversation is a request to an AI assistant for browser automation. Avoid using \"Help\", \"Assistance\", \"Request\" in the title.\n- Be informative and specific to create a unique, distinctive title\n- Keep it short and concise - typically 2-4 words\n- Start with the most identifying/important word first\n- Think like an editor - what will be most compelling and informative for identifying this conversation\n- If you are unsure what the task is about, just create an empty <title></title>\n\nExamples of good titles for browser automation tasks:\n- <title>Draft email response</title>\n- <title>Grocery shopping</title>\n- <title>Paris flight search</title>",
       modelClass: "small_fast"
     }));
-  } catch (s) {
-    return "";
+    return o || __cpBuildTaskStyleGroupTitleFallback(s, n);
+  } catch (r) {
+    return __cpBuildTaskStyleGroupTitleFallback(s, n);
   }
 }
 function __cpEscapeXmlText(e) {

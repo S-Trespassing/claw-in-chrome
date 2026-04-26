@@ -4,6 +4,14 @@
   const OPENAI_CHAT_FORMAT = "openai_chat";
   const OPENAI_RESPONSES_FORMAT = "openai_responses";
   const DEFAULT_FORMAT = ANTHROPIC_FORMAT;
+  const AUTH_MODE_API_KEY = "api_key";
+  const AUTH_MODE_CODEX = "codex";
+  const DEFAULT_AUTH_MODE = AUTH_MODE_API_KEY;
+  const CODEX_DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex";
+  const CODEX_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token";
+  const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+  const CODEX_MODELS_CLIENT_VERSION = "0.125.0-alpha.3";
+  const CODEX_ACCESS_TOKEN_REFRESH_SKEW_MS = 120000;
   const DEFAULT_CONTEXT_WINDOW = 200000;
   const DEFAULT_MAX_OUTPUT_TOKENS = 10000;
   const MIN_CONTEXT_WINDOW = 20000;
@@ -39,6 +47,20 @@
   const FETCHED_MODELS_CACHE_LIMIT = 24;
   const HEALTH_CHECK_PROMPT = "Reply with OK only.";
   const HEALTH_CHECK_MAX_TOKENS = 64;
+  function normalizeAuthMode(value) {
+    const mode = String(value || "")
+      .trim()
+      .toLowerCase();
+    if (
+      mode === AUTH_MODE_CODEX ||
+      mode === "chatgpt" ||
+      mode === "codex_login" ||
+      mode === "codex-chatgpt"
+    ) {
+      return AUTH_MODE_CODEX;
+    }
+    return AUTH_MODE_API_KEY;
+  }
   function normalizeFormat(value) {
     const format = String(value || "")
       .trim()
@@ -53,6 +75,124 @@
       return OPENAI_RESPONSES_FORMAT;
     }
     return DEFAULT_FORMAT;
+  }
+  function parseJsonObject(value) {
+    const text = String(value || "").trim();
+    if (!text || !/^[\[{]/.test(text)) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  function decodeBase64UrlJson(value) {
+    const text = String(value || "").trim();
+    if (!text) {
+      return null;
+    }
+    try {
+      const base64 = text.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+      const decoded =
+        typeof globalThis.atob === "function" ? globalThis.atob(padded) : "";
+      if (!decoded) {
+        return null;
+      }
+      const jsonText = decodeURIComponent(
+        decoded
+          .split("")
+          .map(function (char) {
+            return "%" + char.charCodeAt(0).toString(16).padStart(2, "0");
+          })
+          .join(""),
+      );
+      const parsed = JSON.parse(jsonText);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  function decodeJwtPayload(token) {
+    const parts = String(token || "").split(".");
+    if (parts.length < 2) {
+      return null;
+    }
+    return decodeBase64UrlJson(parts[1]);
+  }
+  function extractCodexAccountIdFromPayload(payload) {
+    if (!payload || typeof payload !== "object") {
+      return "";
+    }
+    const directCandidates = [
+      payload.account_id,
+      payload.chatgpt_account_id,
+      payload["chatgpt_account_id"],
+    ];
+    for (const candidate of directCandidates) {
+      const value = String(candidate || "").trim();
+      if (value) {
+        return value;
+      }
+    }
+    const authClaim = payload["https://api.openai.com/auth"];
+    if (authClaim && typeof authClaim === "object") {
+      return extractCodexAccountIdFromPayload(authClaim);
+    }
+    return "";
+  }
+  function extractCodexAccountIdFromToken(token) {
+    return extractCodexAccountIdFromPayload(decodeJwtPayload(token));
+  }
+  function normalizeCodexAuthPayload(rawApiKey, source) {
+    const raw = String(rawApiKey || "").trim();
+    const parsed = parseJsonObject(raw);
+    const tokenSource =
+      parsed?.tokens && typeof parsed.tokens === "object"
+        ? parsed.tokens
+        : parsed && typeof parsed === "object"
+          ? parsed
+          : {};
+    const accessToken = String(
+      tokenSource.access_token || tokenSource.accessToken || raw,
+    ).trim();
+    const refreshToken = String(
+      tokenSource.refresh_token ||
+        tokenSource.refreshToken ||
+        source?.codexRefreshToken ||
+        source?.refreshToken ||
+        "",
+    ).trim();
+    const idToken = String(
+      tokenSource.id_token || tokenSource.idToken || source?.codexIdToken || "",
+    ).trim();
+    const accountId = String(
+      tokenSource.account_id ||
+        tokenSource.accountId ||
+        source?.codexAccountId ||
+        source?.accountId ||
+        extractCodexAccountIdFromToken(idToken) ||
+        extractCodexAccountIdFromToken(accessToken) ||
+        "",
+    ).trim();
+    const lastRefresh = String(
+      parsed?.last_refresh ||
+        parsed?.lastRefresh ||
+        source?.codexLastRefresh ||
+        source?.lastRefresh ||
+        "",
+    ).trim();
+    return {
+      apiKey: accessToken,
+      codexAccountId: accountId,
+      codexRefreshToken: refreshToken,
+      codexLastRefresh: lastRefresh,
+    };
+  }
+  function isCodexAuthConfig(config) {
+    return normalizeAuthMode(config?.authMode) === AUTH_MODE_CODEX;
   }
   function inferFormat(source) {
     const explicitFormat = String(source?.format || "").trim();
@@ -107,13 +247,32 @@
   }
   function normalizeConfig(raw, fallbackEnabled) {
     const source = raw && typeof raw === "object" ? raw : {};
+    const authMode = normalizeAuthMode(source.authMode);
+    const codexAuth =
+      authMode === AUTH_MODE_CODEX
+        ? normalizeCodexAuthPayload(source.apiKey, source)
+        : null;
     return {
+      id: String(source.id || "").trim(),
       name: String(source.name || "").trim(),
-      format: inferFormat(source),
-      baseUrl: String(source.baseUrl || "")
+      authMode,
+      format:
+        authMode === AUTH_MODE_CODEX ? OPENAI_RESPONSES_FORMAT : inferFormat(source),
+      baseUrl: String(
+        source.baseUrl || (authMode === AUTH_MODE_CODEX ? CODEX_DEFAULT_BASE_URL : ""),
+      )
         .trim()
         .replace(/\/+$/, ""),
-      apiKey: String(source.apiKey || "").trim(),
+      apiKey:
+        authMode === AUTH_MODE_CODEX
+          ? codexAuth.apiKey
+          : String(source.apiKey || "").trim(),
+      codexAccountId:
+        authMode === AUTH_MODE_CODEX ? codexAuth.codexAccountId : "",
+      codexRefreshToken:
+        authMode === AUTH_MODE_CODEX ? codexAuth.codexRefreshToken : "",
+      codexLastRefresh:
+        authMode === AUTH_MODE_CODEX ? codexAuth.codexLastRefresh : "",
       defaultModel: String(source.defaultModel || "").trim(),
       fastModel: String(
         source.fastModel || source.small_fast_model || "",
@@ -138,9 +297,13 @@
   function createEmptyConfig() {
     return {
       name: "",
+      authMode: DEFAULT_AUTH_MODE,
       format: DEFAULT_FORMAT,
       baseUrl: "",
       apiKey: "",
+      codexAccountId: "",
+      codexRefreshToken: "",
+      codexLastRefresh: "",
       defaultModel: "",
       fastModel: "",
       reasoningEffort: "medium",
@@ -151,6 +314,20 @@
   }
   function joinUrl(baseUrl, suffix) {
     return `${String(baseUrl || "").replace(/\/+$/, "")}/${String(suffix || "").replace(/^\/+/, "")}`;
+  }
+  function buildModelsUrl(config) {
+    const next = normalizeConfig(config);
+    const url = joinUrl(next.baseUrl, "models");
+    if (!isCodexAuthConfig(next)) {
+      return url;
+    }
+    const separator = url.includes("?") ? "&" : "?";
+    return (
+      url +
+      separator +
+      "client_version=" +
+      encodeURIComponent(CODEX_MODELS_CLIENT_VERSION)
+    );
   }
   function buildRequestUrl(baseUrl, format) {
     const normalizedBaseUrl = String(baseUrl || "")
@@ -311,9 +488,15 @@
     if (!next.baseUrl || !next.apiKey) {
       return "";
     }
+    const credentialKey =
+      next.authMode === AUTH_MODE_CODEX
+        ? next.codexAccountId || next.codexRefreshToken || next.apiKey
+        : next.apiKey;
     return (
       "provider_" +
-      hashProviderCacheKey([next.format, next.baseUrl, next.apiKey].join("\n"))
+      hashProviderCacheKey(
+        [next.authMode, next.format, next.baseUrl, credentialKey].join("\n"),
+      )
     );
   }
   function normalizeFetchedModelsCache(raw) {
@@ -392,9 +575,13 @@
     return {
       id: String(raw?.id || "").trim() || createProfileId(),
       name: String(raw?.name || "").trim(),
+      authMode: config.authMode,
       format: config.format,
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
+      codexAccountId: config.codexAccountId,
+      codexRefreshToken: config.codexRefreshToken,
+      codexLastRefresh: config.codexLastRefresh,
       defaultModel: config.defaultModel,
       fastModel: config.fastModel,
       reasoningEffort: config.reasoningEffort,
@@ -415,6 +602,7 @@
     const config = normalizeConfig(raw);
     return !!(
       config.name ||
+      config.authMode !== DEFAULT_AUTH_MODE ||
       config.baseUrl ||
       config.apiKey ||
       config.defaultModel ||
@@ -428,11 +616,26 @@
     }
     return {
       name: String(profile.name || "").trim(),
-      format: normalizeFormat(profile.format),
-      baseUrl: String(profile.baseUrl || "")
+      authMode: normalizeAuthMode(profile.authMode),
+      format: isCodexAuthConfig(profile)
+        ? OPENAI_RESPONSES_FORMAT
+        : normalizeFormat(profile.format),
+      baseUrl: String(
+        profile.baseUrl ||
+          (isCodexAuthConfig(profile) ? CODEX_DEFAULT_BASE_URL : ""),
+      )
         .trim()
         .replace(/\/+$/, ""),
       apiKey: String(profile.apiKey || "").trim(),
+      codexAccountId: isCodexAuthConfig(profile)
+        ? String(profile.codexAccountId || "").trim()
+        : "",
+      codexRefreshToken: isCodexAuthConfig(profile)
+        ? String(profile.codexRefreshToken || "").trim()
+        : "",
+      codexLastRefresh: isCodexAuthConfig(profile)
+        ? String(profile.codexLastRefresh || "").trim()
+        : "",
       defaultModel: String(profile.defaultModel || "").trim(),
       fastModel: String(profile.fastModel || "").trim(),
       reasoningEffort: normalizeReasoningEffort(profile.reasoningEffort),
@@ -957,19 +1160,216 @@
       };
     }
   }
+  function parseServerSentEventText(text) {
+    const events = [];
+    const blocks = String(text || "").split(/\r?\n\r?\n+/);
+    for (const block of blocks) {
+      const dataLines = [];
+      for (const line of block.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(":")) {
+          continue;
+        }
+        if (trimmed.startsWith("data:")) {
+          dataLines.push(trimmed.slice(5).trimStart());
+        }
+      }
+      const data = dataLines.join("\n").trim();
+      if (!data || data === "[DONE]") {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed && typeof parsed === "object") {
+          events.push(parsed);
+        }
+      } catch {
+        events.push({
+          message: data,
+        });
+      }
+    }
+    return events;
+  }
+  function extractOutputTextFromSseEvent(event) {
+    if (!event || typeof event !== "object") {
+      return "";
+    }
+    const type = String(event.type || "").trim();
+    if (
+      type === "response.output_text.delta" &&
+      typeof event.delta === "string"
+    ) {
+      return event.delta;
+    }
+    if (
+      type === "response.output_text.delta" &&
+      typeof event.text === "string"
+    ) {
+      return event.text;
+    }
+    if (typeof event.delta === "string") {
+      return event.delta;
+    }
+    if (typeof event.delta?.text === "string") {
+      return event.delta.text;
+    }
+    if (Array.isArray(event.choices)) {
+      return event.choices
+        .map(function (choice) {
+          return String(choice?.delta?.content || "").trim();
+        })
+        .filter(Boolean)
+        .join("");
+    }
+    return "";
+  }
+  function extractDoneTextFromSseEvent(event) {
+    if (!event || typeof event !== "object") {
+      return "";
+    }
+    if (
+      String(event.type || "") === "response.output_text.done" &&
+      typeof event.text === "string"
+    ) {
+      return event.text;
+    }
+    return "";
+  }
+  function sseEventsToProbePayload(events) {
+    const list = Array.isArray(events) ? events : [];
+    const deltaText = list.map(extractOutputTextFromSseEvent).join("").trim();
+    const doneText = deltaText
+      ? ""
+      : list.map(extractDoneTextFromSseEvent).filter(Boolean).join("").trim();
+    const outputText = deltaText || doneText;
+    return {
+      output_text: outputText,
+      output: list,
+      event_count: list.length,
+    };
+  }
+  async function parseProviderPayload(response) {
+    const text = await response.text();
+    if (!text) {
+      return {};
+    }
+    const contentType = String(response.headers?.get?.("content-type") || "");
+    if (contentType.includes("text/event-stream") || /^data:/m.test(text)) {
+      const events = parseServerSentEventText(text);
+      if (events.length) {
+        return sseEventsToProbePayload(events);
+      }
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {
+        message: text,
+      };
+    }
+  }
+  function getJwtExpiryMs(token) {
+    const payload = decodeJwtPayload(token);
+    const seconds = Number(payload?.exp);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      return 0;
+    }
+    return seconds * 1000;
+  }
+  function shouldRefreshCodexAccessToken(config, nowMs) {
+    const next = normalizeConfig(config);
+    if (!isCodexAuthConfig(next) || !next.codexRefreshToken) {
+      return false;
+    }
+    const expiryMs = getJwtExpiryMs(next.apiKey);
+    if (!expiryMs) {
+      return false;
+    }
+    const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+    return expiryMs <= now + CODEX_ACCESS_TOKEN_REFRESH_SKEW_MS;
+  }
+  async function refreshCodexAuthForConfig(config, options) {
+    const settings = options && typeof options === "object" ? options : {};
+    const next = normalizeConfig(config);
+    if (!isCodexAuthConfig(next) || !next.codexRefreshToken) {
+      return next;
+    }
+    if (
+      !settings.force &&
+      !shouldRefreshCodexAccessToken(next, settings.nowMs)
+    ) {
+      return next;
+    }
+    const fetchImpl = settings.fetchImpl || globalThis.fetch;
+    if (typeof fetchImpl !== "function") {
+      return next;
+    }
+    const response = await fetchImpl(CODEX_REFRESH_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        client_id: CODEX_CLIENT_ID,
+        grant_type: "refresh_token",
+        refresh_token: next.codexRefreshToken,
+      }),
+      signal: settings.signal,
+    });
+    const payload = await parseJsonSafe(response);
+    if (!response.ok) {
+      throw new Error(
+        extractErrorMessage(payload, `Codex 认证刷新失败（${response.status}）`),
+      );
+    }
+    const refreshed = normalizeConfig({
+      ...next,
+      apiKey: String(payload.access_token || next.apiKey).trim(),
+      codexRefreshToken: String(
+        payload.refresh_token || next.codexRefreshToken,
+      ).trim(),
+      codexAccountId:
+        extractCodexAccountIdFromToken(payload.id_token) ||
+        extractCodexAccountIdFromToken(payload.access_token) ||
+        next.codexAccountId,
+      codexLastRefresh: new Date().toISOString(),
+    });
+    const profileId = String(settings.profileId || next.id || "").trim();
+    if (settings.persist !== false && profileId) {
+      await saveProviderProfile(refreshed, {
+        profileId,
+        storageArea: settings.storageArea,
+        activateOnSave: true,
+      });
+    }
+    return refreshed;
+  }
   function buildProviderHeaders(config, format, includeContentType) {
     const normalizedFormat = normalizeFormat(format);
-    const headers =
-      normalizedFormat === ANTHROPIC_FORMAT
-        ? {
-            "x-api-key": config.apiKey,
-            "anthropic-version": "2023-06-01",
-            Accept: "application/json",
-          }
-        : {
-            Authorization: `Bearer ${config.apiKey}`,
-            Accept: "application/json",
-          };
+    let headers;
+    if (normalizedFormat === ANTHROPIC_FORMAT) {
+      headers = {
+        "x-api-key": config.apiKey,
+        "anthropic-version": "2023-06-01",
+        Accept: "application/json",
+      };
+    } else if (isCodexAuthConfig(config)) {
+      headers = {
+        Authorization: `Bearer ${config.apiKey}`,
+        Accept: "text/event-stream, application/json",
+        version: "claw-in-chrome-codex-provider",
+      };
+      if (config.codexAccountId) {
+        headers["ChatGPT-Account-ID"] = config.codexAccountId;
+      }
+    } else {
+      headers = {
+        Authorization: `Bearer ${config.apiKey}`,
+        Accept: "application/json",
+      };
+    }
     if (includeContentType) {
       headers["content-type"] = "application/json";
     }
@@ -986,6 +1386,9 @@
     );
   }
   function buildHealthCheckCandidates(config) {
+    if (isCodexAuthConfig(config)) {
+      return [OPENAI_RESPONSES_FORMAT];
+    }
     const requestedFormat = normalizeFormat(config?.format);
     const candidates = [requestedFormat];
     const baseUrl = String(config?.baseUrl || "")
@@ -1040,12 +1443,39 @@
         ],
       };
     }
-    return {
+    const responseBody = {
       model,
-      max_output_tokens: HEALTH_CHECK_MAX_TOKENS,
-      input: HEALTH_CHECK_PROMPT,
-      stream: false,
+      input: isCodexAuthConfig(config)
+        ? [
+            {
+              type: "message",
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: HEALTH_CHECK_PROMPT,
+                },
+              ],
+            },
+          ]
+        : HEALTH_CHECK_PROMPT,
+      ...(isCodexAuthConfig(config)
+        ? {
+            instructions: "",
+            tools: [],
+            tool_choice: "auto",
+            parallel_tool_calls: false,
+            reasoning: null,
+            store: false,
+            include: [],
+          }
+        : {}),
+      stream: isCodexAuthConfig(config),
     };
+    if (!isCodexAuthConfig(config)) {
+      responseBody.max_output_tokens = HEALTH_CHECK_MAX_TOKENS;
+    }
+    return responseBody;
   }
   function extractReadableTextFromPart(part, options) {
     const settings = options && typeof options === "object" ? options : {};
@@ -1268,7 +1698,7 @@
     try {
       const headers = buildProviderHeaders(next, next.format, false);
       const response = await (options?.fetchImpl || globalThis.fetch)(
-        joinUrl(next.baseUrl, "models"),
+        buildModelsUrl(next),
         {
           method: "GET",
           headers,
@@ -1281,15 +1711,26 @@
           extractErrorMessage(payload, `获取模型失败（${response.status}）`),
         );
       }
-      const list = Array.isArray(payload?.data) ? payload.data : [];
+      const list = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload?.models)
+          ? payload.models
+          : [];
       const models = dedupeModels(
-        list.map(function (item) {
-          const id = String(item?.id || "").trim();
-          return {
-            value: id,
-            label: String(item?.display_name || id).trim() || id,
-          };
-        }),
+        list
+          .filter(function (item) {
+            if (!isCodexAuthConfig(next)) {
+              return true;
+            }
+            return item?.visibility !== "hide" && item?.supported_in_api !== false;
+          })
+          .map(function (item) {
+            const id = String(item?.id || item?.slug || "").trim();
+            return {
+              value: id,
+              label: String(item?.display_name || id).trim() || id,
+            };
+          }),
       );
       if (!models.length) {
         throw new Error("接口已响应，但没有返回可选模型。");
@@ -1333,7 +1774,7 @@
             body: JSON.stringify(buildHealthCheckBody(next, format)),
             signal: controller.signal,
           });
-          const payload = await parseJsonSafe(response);
+          const payload = await parseProviderPayload(response);
           if (!response.ok) {
             throw new Error(
               extractErrorMessage(
@@ -1400,6 +1841,10 @@
     OPENAI_CHAT_FORMAT,
     OPENAI_RESPONSES_FORMAT,
     DEFAULT_FORMAT,
+    AUTH_MODE_API_KEY,
+    AUTH_MODE_CODEX,
+    DEFAULT_AUTH_MODE,
+    CODEX_DEFAULT_BASE_URL,
     DEFAULT_CONTEXT_WINDOW,
     DEFAULT_MAX_OUTPUT_TOKENS,
     LEGACY_STORAGE_KEY,
@@ -1412,6 +1857,7 @@
     HTTP_PROVIDER_MIGRATED_KEY,
     HTTP_PROVIDER_DISABLED_MESSAGE,
     extractErrorMessage,
+    normalizeAuthMode,
     normalizeFormat,
     normalizeReasoningEffort,
     normalizeMaxOutputTokens,
@@ -1431,6 +1877,7 @@
     reconcileActiveProviderModelSelection,
     readCachedFetchedModels,
     persistFetchedModelsForConfig,
+    refreshCodexAuthForConfig,
     buildRequestUrl,
     fetchProviderModels,
     probeProviderModel,

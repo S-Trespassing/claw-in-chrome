@@ -10,6 +10,8 @@
   const NATIVE_FETCH_KEY = "__customProviderNativeFetch__";
   const OPENAI_CHAT_FORMAT = "openai_chat";
   const OPENAI_RESPONSES_FORMAT = "openai_responses";
+  const AUTH_MODE_API_KEY = "api_key";
+  const AUTH_MODE_CODEX = "codex";
   const DEFAULT_CONTEXT_WINDOW = 200000;
   const DEFAULT_MAX_OUTPUT_TOKENS = 10000;
   const MIN_CONTEXT_WINDOW = 20000;
@@ -93,6 +95,19 @@
     }
     return ANTHROPIC_FORMAT;
   }
+  function normalizeAuthMode(value) {
+    const helpers = getProviderStoreHelpers();
+    if (helpers && typeof helpers.normalizeAuthMode === "function") {
+      return helpers.normalizeAuthMode(value);
+    }
+    const mode = String(value || "").trim().toLowerCase();
+    return mode === AUTH_MODE_CODEX || mode === "chatgpt"
+      ? AUTH_MODE_CODEX
+      : AUTH_MODE_API_KEY;
+  }
+  function isCodexAuthConfig(config) {
+    return normalizeAuthMode(config?.authMode) === AUTH_MODE_CODEX;
+  }
   function inferFormat(source) {
     const explicitFormat = String(source?.format || "").trim();
     if (explicitFormat) {
@@ -143,14 +158,38 @@
     return Math.max(1, Math.round(numeric));
   }
   function normalizeConfig(raw) {
-    const source = raw && typeof raw === "object" ? raw : {};
+    const original = raw && typeof raw === "object" ? raw : {};
+    const helpers = getProviderStoreHelpers();
+    const source =
+      helpers && typeof helpers.normalizeConfig === "function"
+        ? {
+            ...original,
+            ...helpers.normalizeConfig(original)
+          }
+        : original;
+    const authMode = normalizeAuthMode(source.authMode);
     return {
+      id: String(source.id || source.profileId || "").trim(),
       name: String(source.name || "").trim(),
       baseUrl: String(source.baseUrl || "").trim().replace(/\/+$/, ""),
       apiKey: String(source.apiKey || "").trim(),
+      authMode,
+      codexAccountId:
+        authMode === AUTH_MODE_CODEX
+          ? String(source.codexAccountId || source.accountId || "").trim()
+          : "",
+      codexRefreshToken:
+        authMode === AUTH_MODE_CODEX
+          ? String(source.codexRefreshToken || source.refreshToken || "").trim()
+          : "",
+      codexLastRefresh:
+        authMode === AUTH_MODE_CODEX
+          ? String(source.codexLastRefresh || source.lastRefresh || "").trim()
+          : "",
       defaultModel: String(source.defaultModel || "").trim(),
       fastModel: String(source.fastModel || source.small_fast_model || "").trim(),
-      format: inferFormat(source),
+      format:
+        authMode === AUTH_MODE_CODEX ? OPENAI_RESPONSES_FORMAT : inferFormat(source),
       reasoningEffort: normalizeReasoningEffort(source.reasoningEffort),
       maxOutputTokens: normalizeMaxOutputTokens(source.maxOutputTokens),
       contextWindow: normalizeContextWindow(source.contextWindow),
@@ -173,7 +212,7 @@
       ...body
     };
     const hasExplicitMaxTokens = Number.isFinite(Number(body?.max_tokens)) && Number(body.max_tokens) > 0;
-    if (!hasExplicitMaxTokens && Number.isFinite(Number(config?.maxOutputTokens)) && Number(config.maxOutputTokens) > 0) {
+    if (!isCodexAuthConfig(config) && !hasExplicitMaxTokens && Number.isFinite(Number(config?.maxOutputTokens)) && Number(config.maxOutputTokens) > 0) {
       nextBody.max_tokens = Number(config.maxOutputTokens);
     }
     const hasExplicitReasoningConfig = body?.output_config && typeof body.output_config === "object" && String(body.output_config.effort || "").trim() || body?.thinking && typeof body.thinking === "object";
@@ -220,6 +259,34 @@
       return cachedConfig;
     }
     return readConfig();
+  }
+  async function resolveProviderRequestConfig(config, options) {
+    const next = normalizeConfig(config);
+    if (!isCodexAuthConfig(next)) {
+      return next;
+    }
+    const helpers = getProviderStoreHelpers();
+    if (!helpers || typeof helpers.refreshCodexAuthForConfig !== "function") {
+      return next;
+    }
+    try {
+      const refreshed = normalizeConfig(
+        await helpers.refreshCodexAuthForConfig(next, {
+          profileId: next.id,
+          fetchImpl: nativeFetch,
+          force: !!options?.force,
+          signal: options?.signal
+        })
+      );
+      cachedConfig = refreshed;
+      hasLoadedConfig = true;
+      return refreshed;
+    } catch (error) {
+      debugLog("provider.codex_refresh_failed", {
+        message: String(error?.message || error || "")
+      }, "warn");
+      return next;
+    }
   }
   if (globalThis.chrome?.storage?.onChanged) {
     chrome.storage.onChanged.addListener(function (changes, areaName) {
@@ -1017,6 +1084,12 @@
     }
   }
   function buildProviderRequestCandidates(config, body) {
+    if (isCodexAuthConfig(config)) {
+      return [{
+        format: OPENAI_RESPONSES_FORMAT,
+        reason: "codex_auth"
+      }];
+    }
     const requestedFormat = normalizeFormat(config?.format);
     const candidates = [{
       format: requestedFormat,
@@ -1828,7 +1901,8 @@
     }
     return input;
   }
-  function anthropicToOpenAIResponses(body, promptCacheKey) {
+  function anthropicToOpenAIResponses(body, promptCacheKey, config) {
+    const codexAuth = isCodexAuthConfig(config);
     const result = {};
     if (body?.model) {
       result.model = body.model;
@@ -1840,17 +1914,23 @@
     if (Array.isArray(body?.messages)) {
       result.input = convertMessagesToResponsesInput(body.messages);
     }
-    if (body?.max_tokens != null) {
+    if (!codexAuth && body?.max_tokens != null) {
       result.max_output_tokens = body.max_tokens;
     }
-    if (body?.temperature != null) {
+    if (!codexAuth && body?.temperature != null) {
       result.temperature = body.temperature;
     }
-    if (body?.top_p != null) {
+    if (!codexAuth && body?.top_p != null) {
       result.top_p = body.top_p;
     }
     if (body?.stream != null) {
       result.stream = body.stream;
+    }
+    if (codexAuth) {
+      if (typeof result.instructions !== "string") {
+        result.instructions = "";
+      }
+      result.store = false;
     }
     const effort = resolveReasoningEffort(body);
     if (effort) {
@@ -2860,6 +2940,12 @@
     }
     headers.set("content-type", "application/json");
     headers.set("authorization", "Bearer " + config.apiKey);
+    if (isCodexAuthConfig(config)) {
+      headers.set("version", "claw-in-chrome-codex-provider");
+      if (config.codexAccountId) {
+        headers.set("ChatGPT-Account-ID", config.codexAccountId);
+      }
+    }
     if (isStreamRequest) {
       headers.set("accept", "text/event-stream");
     }
@@ -2918,31 +3004,34 @@
     return createAnthropicErrorResponse(parsed.status, parsed.message);
   }
   async function forwardProviderRequest(request, config) {
-    await assertHttpProviderAllowed(config);
+    const requestConfig = await resolveProviderRequestConfig(config, {
+      signal: request.signal
+    });
+    await assertHttpProviderAllowed(requestConfig);
     const bodyText = await request.clone().text();
     const parsedBody = safeJsonParse(bodyText, null);
-    const body = applyConfiguredAnthropicDefaults(parsedBody, config);
+    const body = applyConfiguredAnthropicDefaults(parsedBody, requestConfig);
     if (!body || typeof body !== "object") {
       return createAnthropicErrorResponse(400, "自定义供应商只支持 JSON 请求体。");
     }
-    const candidates = buildProviderRequestCandidates(config, body);
+    const candidates = buildProviderRequestCandidates(requestConfig, body);
     debugLog("provider.request_start", {
-      configuredFormat: config.format,
+      configuredFormat: requestConfig.format,
       candidateFormats: candidates.map(function (item) {
         return item.format;
       }),
-      baseUrl: config.baseUrl,
+      baseUrl: requestConfig.baseUrl,
       model: String(body?.model || ""),
       stream: !!body?.stream,
       messageCount: Array.isArray(body?.messages) ? body.messages.length : 0
     });
     for (let index = 0; index < candidates.length; index++) {
       const candidate = candidates[index];
-      const candidateConfig = {
-        ...config,
+      let candidateConfig = {
+        ...requestConfig,
         format: candidate.format
       };
-      const providerBody = candidate.format === OPENAI_CHAT_FORMAT ? anthropicToOpenAIChat(body, candidateConfig.promptCacheKey) : anthropicToOpenAIResponses(body, candidateConfig.promptCacheKey);
+      const providerBody = candidate.format === OPENAI_CHAT_FORMAT ? anthropicToOpenAIChat(body, candidateConfig.promptCacheKey) : anthropicToOpenAIResponses(body, candidateConfig.promptCacheKey, candidateConfig);
       const providerUrl = buildProviderUrl(candidateConfig);
       const isStreamRequest = !!providerBody.stream;
       debugLog("provider.request_attempt", {
@@ -2965,6 +3054,25 @@
         if (!upstream.ok) {
           const providerError = await parseProviderError(upstream, "自定义模型供应商返回了错误。");
           lastProviderError = providerError;
+          if (isCodexAuthConfig(candidateConfig) && providerError.status === 401 && retryIndex === 0) {
+            const refreshedConfig = await resolveProviderRequestConfig(candidateConfig, {
+              force: true,
+              signal: request.signal
+            });
+            if (refreshedConfig.apiKey && refreshedConfig.apiKey !== candidateConfig.apiKey) {
+              candidateConfig = {
+                ...refreshedConfig,
+                format: candidate.format
+              };
+              debugLog("provider.codex_refresh_retry", {
+                attempt: index + 1,
+                totalAttempts: candidates.length,
+                format: candidate.format,
+                providerUrl
+              }, "warn");
+              continue;
+            }
+          }
           const detectedLimit = extractMaxTokenLimit(providerError.message) || extractMaxTokenLimit(providerError.text);
           const appliedClamp = detectedLimit != null ? clampRequestMaxTokens(providerBody, detectedLimit) : null;
           if (appliedClamp) {
@@ -2976,7 +3084,7 @@
               reason: candidate.reason,
               providerUrl,
               status: providerError.status,
-              model: String(providerBody?.model || body?.model || config?.defaultModel || ""),
+              model: String(providerBody?.model || body?.model || requestConfig?.defaultModel || ""),
               tokenKey: appliedClamp.key,
               previousMaxTokens: appliedClamp.previous,
               cappedMaxTokens: appliedClamp.next,
@@ -3010,7 +3118,12 @@
           contentType,
           stream: isStreamRequest
         });
-        if (isStreamRequest && contentType.includes("text/event-stream") && upstream.body) {
+        const isEventStreamResponse =
+          contentType.includes("text/event-stream") ||
+          (isCodexAuthConfig(candidateConfig) &&
+            upstream.body &&
+            !contentType.includes("application/json"));
+        if (isStreamRequest && isEventStreamResponse && upstream.body) {
           debugLog("provider.stream_transform", {
             attempt: index + 1,
             totalAttempts: candidates.length,

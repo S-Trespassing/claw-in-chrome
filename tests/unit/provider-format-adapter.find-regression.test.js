@@ -85,7 +85,7 @@ async function runAdapterWithUpstreamHandler(upstreamHandler, options = {}) {
       }
     ]
   };
-  const request = new Request("https://provider.example/v1/messages", {
+  const request = new Request(options.requestUrl || "https://provider.example/v1/messages", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -95,6 +95,13 @@ async function runAdapterWithUpstreamHandler(upstreamHandler, options = {}) {
     body: JSON.stringify(requestBody)
   });
   const response = await sandbox.fetch(request);
+  if (options.readText) {
+    return {
+      status: response.status,
+      text: await response.text(),
+      upstreamCalls
+    };
+  }
   return {
     status: response.status,
     json: await response.json(),
@@ -375,6 +382,113 @@ async function testResponsesTextWrappedToolCallIsConvertedToToolUse() {
     }
   ]);
   assert.equal(result.json.stop_reason, "tool_use");
+}
+
+async function testCodexAuthHeadersForwardToResponsesEndpoint() {
+  const result = await runAdapterWithUpstreamHandler(async () => new Response(JSON.stringify({
+    id: "resp-codex",
+    model: "gpt-5.5",
+    status: "completed",
+    output: [
+      {
+        type: "message",
+        content: [
+          {
+            type: "output_text",
+            text: "FOUND: 0\nERROR: no matches"
+          }
+        ]
+      }
+    ]
+  }), {
+    status: 200,
+    headers: {
+      "content-type": "application/json; charset=utf-8"
+    }
+  }), {
+    config: {
+      authMode: "codex",
+      format: "openai_responses",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+      apiKey: "codex-access",
+      codexAccountId: "acc_123",
+      defaultModel: "gpt-5.5"
+    },
+    requestUrl: "https://chatgpt.com/backend-api/codex/messages",
+    requestBody: {
+      model: "gpt-5.5",
+      max_tokens: 128,
+      temperature: 0,
+      stream: true,
+      messages: [
+        {
+          role: "user",
+          content: "Find cats"
+        }
+      ]
+    }
+  });
+
+  assert.equal(result.upstreamCalls.length, 1, "should call Codex once");
+  assert.equal(result.upstreamCalls[0].url, "https://chatgpt.com/backend-api/codex/responses");
+  assert.equal(result.upstreamCalls[0].headers.authorization, "Bearer codex-access");
+  assert.equal(result.upstreamCalls[0].headers["chatgpt-account-id"], "acc_123");
+  assert.equal(result.upstreamCalls[0].headers.version, "claw-in-chrome-codex-provider");
+  assert.equal(Object.prototype.hasOwnProperty.call(result.upstreamCalls[0].body, "max_output_tokens"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result.upstreamCalls[0].body, "temperature"), false);
+  assert.equal(result.upstreamCalls[0].body.instructions, "");
+  assert.equal(result.upstreamCalls[0].body.store, false);
+  assert.equal(result.upstreamCalls[0].body.stream, true);
+  assert.equal(result.json.content[0].text, "FOUND: 0\nERROR: no matches");
+}
+
+async function testCodexStreamWithoutContentTypeTransforms() {
+  const result = await runAdapterWithUpstreamHandler(async () => new Response([
+    "event: response.created",
+    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_codex_stream\",\"model\":\"gpt-5.5\",\"status\":\"in_progress\"}}",
+    "",
+    "event: response.output_text.delta",
+    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}",
+    "",
+    "event: response.completed",
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_codex_stream\",\"model\":\"gpt-5.5\",\"status\":\"completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}",
+    "",
+    "data: [DONE]",
+    ""
+  ].join("\n"), {
+    status: 200
+  }), {
+    readText: true,
+    config: {
+      authMode: "codex",
+      format: "openai_responses",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+      apiKey: "codex-access",
+      codexAccountId: "acc_123",
+      defaultModel: "gpt-5.5"
+    },
+    requestUrl: "https://chatgpt.com/backend-api/codex/messages",
+    requestBody: {
+      model: "gpt-5.5",
+      max_tokens: 128,
+      temperature: 0,
+      stream: true,
+      messages: [
+        {
+          role: "user",
+          content: "Find cats"
+        }
+      ]
+    }
+  });
+
+  assert.equal(result.status, 200);
+  assert.match(result.text, /event: message_start/);
+  assert.match(result.text, /event: content_block_delta/);
+  assert.match(result.text, /OK/);
+  assert.equal(Object.prototype.hasOwnProperty.call(result.upstreamCalls[0].body, "max_output_tokens"), false);
+  assert.equal(result.upstreamCalls[0].body.instructions, "");
+  assert.equal(result.upstreamCalls[0].body.store, false);
 }
 
 async function testResponsesRuntimeFallsBackToChatWhenConfiguredEndpointFails() {
@@ -890,6 +1004,8 @@ async function main() {
   await testJsonContentToolCallIsConvertedToToolUse();
   await testNestedFunctionWrapperContentIsConvertedToToolUse();
   await testResponsesTextWrappedToolCallIsConvertedToToolUse();
+  await testCodexAuthHeadersForwardToResponsesEndpoint();
+  await testCodexStreamWithoutContentTypeTransforms();
   await testResponsesRuntimeFallsBackToChatWhenConfiguredEndpointFails();
   await testGpt54ChatToolCallsDropReasoningEffort();
   await testConfiguredProviderDefaultsFillMissingAnthropicFields();
