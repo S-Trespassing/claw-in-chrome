@@ -5,10 +5,16 @@
 
   const sessionContract = globalThis.__CP_CONTRACT__?.session || {};
   const detachedWindowContract = globalThis.__CP_CONTRACT__?.detachedWindow || {};
+  const messageContract = globalThis.__CP_CONTRACT__?.messages || {};
   const CHAT_SCOPE_PREFIX = sessionContract.CHAT_SCOPE_PREFIX || "claw.chat.scopes.";
   const CHAT_CLEANUP_AUDIT_KEY = sessionContract.CHAT_CLEANUP_AUDIT_KEY || "claw.chat.cleanup.audit";
   const CHAT_CLEANUP_AUDIT_LIMIT = Number.isFinite(Number(sessionContract.CHAT_CLEANUP_AUDIT_LIMIT)) ? Math.trunc(Number(sessionContract.CHAT_CLEANUP_AUDIT_LIMIT)) : 40;
   const OPEN_GROUP_DETACHED_WINDOW_MESSAGE_TYPE = detachedWindowContract.OPEN_GROUP_MESSAGE_TYPE || "OPEN_GROUP_DETACHED_WINDOW";
+  const OPEN_SIDE_PANEL_MESSAGE_TYPE = messageContract.open_side_panel || "open_side_panel";
+  const PING_SIDEPANEL_MESSAGE_TYPE = messageContract.PING_SIDEPANEL || "PING_SIDEPANEL";
+  const TOGGLE_SIDE_PANEL_COMMAND_NAME = "toggle-side-panel";
+  const NEW_CHAT_COMMAND_NAME = "new-chat";
+  const NEW_CHAT_SESSION_MESSAGE_TYPE = "NEW_CHAT_SESSION";
 
   function createNoopConsole() {
     return {
@@ -409,6 +415,7 @@
       success: false,
       error: "Missing openDetachedWindowForGroup dependency"
     });
+    const openSidePanelTabIds = new Set();
     const getDetachedLocksForHostWindow = (locks, normalizedWindowId) => Object.values(locks).filter(lockEntry =>
       lockEntry?.hostWindowId === normalizedWindowId &&
       lockEntry?.windowId !== normalizedWindowId
@@ -499,6 +506,87 @@
       return openDetachedWindowForGroup(buildDetachedWindowOpenPayload(message, sender));
     }
 
+    async function resolveCommandTargetTabId(tab) {
+      let targetTabId = normalizePositiveNumber(tab?.id);
+      if (targetTabId) {
+        return targetTabId;
+      }
+      const activeTabs = await chromeApi.tabs?.query?.({
+        active: true,
+        currentWindow: true
+      });
+      return normalizePositiveNumber(activeTabs?.[0]?.id);
+    }
+
+    async function handleToggleSidePanelCommand(command, tab) {
+      if (command !== TOGGLE_SIDE_PANEL_COMMAND_NAME) {
+        return false;
+      }
+      const targetTabId = await resolveCommandTargetTabId(tab);
+      if (!targetTabId) {
+        return false;
+      }
+      if (openSidePanelTabIds.has(targetTabId) && typeof chromeApi.sidePanel?.close === "function") {
+        await chromeApi.sidePanel.close({
+          tabId: targetTabId
+        });
+        openSidePanelTabIds.delete(targetTabId);
+        return true;
+      }
+      await chromeApi.sidePanel?.setOptions?.({
+        tabId: targetTabId,
+        path: `sidepanel.html?tabId=${encodeURIComponent(targetTabId)}`,
+        enabled: true
+      });
+      await chromeApi.sidePanel?.open?.({
+        tabId: targetTabId
+      });
+      openSidePanelTabIds.add(targetTabId);
+      return true;
+    }
+
+    async function ensureSidePanelReadyForTab(tabId) {
+      const normalizedTabId = normalizePositiveNumber(tabId);
+      if (!normalizedTabId) {
+        return false;
+      }
+      await chromeApi.runtime.sendMessage({
+        type: OPEN_SIDE_PANEL_MESSAGE_TYPE,
+        tabId: normalizedTabId
+      });
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        try {
+          const pingResult = await chromeApi.runtime.sendMessage({
+            type: PING_SIDEPANEL_MESSAGE_TYPE,
+            targetTabId: normalizedTabId
+          });
+          if (pingResult?.success === true) {
+            return true;
+          }
+        } catch {}
+      }
+      return false;
+    }
+
+    async function handleNewChatCommand(command, tab) {
+      if (command !== NEW_CHAT_COMMAND_NAME) {
+        return false;
+      }
+      const targetTabId = await resolveCommandTargetTabId(tab);
+      if (!targetTabId) {
+        return false;
+      }
+      const sidePanelReady = await ensureSidePanelReadyForTab(targetTabId);
+      if (!sidePanelReady) {
+        return false;
+      }
+      await chromeApi.runtime.sendMessage({
+        type: NEW_CHAT_SESSION_MESSAGE_TYPE,
+        targetTabId
+      });
+      return true;
+    }
+
     function onMessage(message, sender, sendResponse) {
       // 这里故意只消费 OPEN_GROUP_DETACHED_WINDOW。
       // 其余 ACK/indicator/native host/permission 等消息继续走 bundle 内原始 runtime.onMessage 主桥。
@@ -518,6 +606,21 @@
       return true;
     }
 
+    function onCommand(command, tab) {
+      (async () => {
+        if (await handleToggleSidePanelCommand(command, tab)) {
+          return;
+        }
+        await handleNewChatCommand(command, tab);
+      })().catch(error => {
+        consoleApi.warn?.("[commands] command handling failed", {
+          command,
+          tabId: tab?.id,
+          message: error instanceof Error ? error.message : String(error || "")
+        });
+      });
+    }
+
     return {
       chrome: chromeApi,
       cleanupRuntime,
@@ -526,13 +629,18 @@
       isDetachedWindowOpenMessage,
       buildDetachedWindowOpenPayload,
       handleOpenDetachedWindowMessage,
+      resolveCommandTargetTabId,
+      handleToggleSidePanelCommand,
+      ensureSidePanelReadyForTab,
+      handleNewChatCommand,
       handlers: {
         onInstalled,
         onStartup,
         onTabGroupRemoved,
         onWindowRemoved,
         onTabRemoved,
-        onMessage
+        onMessage,
+        onCommand
       }
     };
   }
@@ -546,6 +654,7 @@
     runtime.chrome.windows?.onRemoved?.addListener?.(runtime.handlers.onWindowRemoved);
     runtime.chrome.tabs?.onRemoved?.addListener?.(runtime.handlers.onTabRemoved);
     runtime.chrome.runtime?.onMessage?.addListener?.(runtime.handlers.onMessage);
+    runtime.chrome.commands?.onCommand?.addListener?.(runtime.handlers.onCommand);
     return runtime;
   }
 

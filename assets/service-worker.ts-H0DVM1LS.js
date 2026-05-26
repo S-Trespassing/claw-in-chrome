@@ -58,6 +58,7 @@ const __cpStorageKeySavedPrompts =
 const __cpAlarmPrefixPrompt = "prompt_";
 const __cpAlarmPrefixRetry = "retry_";
 const __cpCommandToggleSidePanel = "toggle-side-panel";
+const __cpOpenSidePanelTabIds = new Set();
 const __cpContractMessages = globalThis.__CP_CONTRACT__?.messages || {};
 const __cpAgentIndicatorContract =
   globalThis.__CP_CONTRACT__?.agentIndicator || {};
@@ -652,11 +653,22 @@ chrome.commands.onCommand.addListener((e) => {
         active: true,
         currentWindow: true,
       },
-      (e) => {
+      async (e) => {
         const t = e[0];
-        if (t) {
-          K(t);
+        if (!t?.id) {
+          return;
         }
+        if (__cpOpenSidePanelTabIds.has(t.id) && typeof chrome.sidePanel?.close === "function") {
+          try {
+            await chrome.sidePanel.close({
+              tabId: t.id,
+            });
+            __cpOpenSidePanelTabIds.delete(t.id);
+          } catch {}
+          return;
+        }
+        await K(t);
+        __cpOpenSidePanelTabIds.add(t.id);
       },
     );
   }

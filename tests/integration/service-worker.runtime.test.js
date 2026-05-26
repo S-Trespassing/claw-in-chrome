@@ -13,7 +13,10 @@ const runtimePath = path.join(__dirname, "..", "..", "service-worker-runtime.js"
 function createServiceWorkerHarness(options = {}) {
   const chromeMock = createChromeMock({
     storageState: options.storageState || {},
-    existingGroupIds: options.existingGroupIds || []
+    existingGroupIds: options.existingGroupIds || [],
+    tabById: options.tabById || {},
+    runtimeSendMessageResult: options.runtimeSendMessageResult,
+    runtimeSendMessageImpl: options.runtimeSendMessageImpl
   });
   const consoleApi = options.consoleOverride || console;
   const sandbox = {
@@ -257,6 +260,126 @@ async function testWindowRemovedClosesHostWindowLocksAndRemovesWindowLock() {
   assert.deepEqual(removedWindowIds, [5]);
 }
 
+
+async function testCommandHandlerSendsNewChatRuntimeMessage() {
+  const { chromeMock } = createServiceWorkerHarness();
+
+  const commandListener = chromeMock.events.commandsOnCommand.listeners[0];
+  await commandListener("new-chat", {
+    id: 42,
+    windowId: 7
+  });
+  await flushMicrotasks();
+
+  assert.equal(chromeMock.calls.runtime.sendMessage.length, 3);
+  assert.equal(chromeMock.calls.runtime.sendMessage[0].type, "open_side_panel");
+  assert.equal(chromeMock.calls.runtime.sendMessage[0].tabId, 42);
+  assert.equal(chromeMock.calls.runtime.sendMessage[1].type, "PING_SIDEPANEL");
+  assert.equal(chromeMock.calls.runtime.sendMessage[1].targetTabId, 42);
+  assert.equal(chromeMock.calls.runtime.sendMessage[2].type, "NEW_CHAT_SESSION");
+  assert.equal(chromeMock.calls.runtime.sendMessage[2].targetTabId, 42);
+  assert.equal(chromeMock.calls.tabs.sendMessage.length, 0);
+}
+
+async function testCommandHandlerResolvesActiveTabWhenChromeOmitsTabArgument() {
+  const { chromeMock } = createServiceWorkerHarness({
+    tabById: {
+      51: {
+        id: 51,
+        windowId: 9,
+        active: true,
+        currentWindow: true
+      },
+      52: {
+        id: 52,
+        windowId: 10,
+        active: false,
+        currentWindow: false
+      }
+    }
+  });
+
+  const commandListener = chromeMock.events.commandsOnCommand.listeners[0];
+  await commandListener("new-chat");
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.equal(chromeMock.calls.tabs.query.length, 1);
+  assert.deepEqual(chromeMock.calls.tabs.query[0], {
+    active: true,
+    currentWindow: true
+  });
+  assert.equal(chromeMock.calls.runtime.sendMessage.length, 3);
+  assert.equal(chromeMock.calls.runtime.sendMessage[0].type, "open_side_panel");
+  assert.equal(chromeMock.calls.runtime.sendMessage[0].tabId, 51);
+  assert.equal(chromeMock.calls.runtime.sendMessage[1].type, "PING_SIDEPANEL");
+  assert.equal(chromeMock.calls.runtime.sendMessage[1].targetTabId, 51);
+  assert.equal(chromeMock.calls.runtime.sendMessage[2].type, "NEW_CHAT_SESSION");
+  assert.equal(chromeMock.calls.runtime.sendMessage[2].targetTabId, 51);
+}
+
+async function testNewChatCommandOpensAndPingsSidePanelBeforeSendingMessage() {
+  const { chromeMock } = createServiceWorkerHarness({
+    runtimeSendMessageResult: {
+      success: true,
+      tabId: 42
+    }
+  });
+
+  const commandListener = chromeMock.events.commandsOnCommand.listeners[0];
+  await commandListener("new-chat", {
+    id: 42,
+    windowId: 7
+  });
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.equal(chromeMock.calls.runtime.sendMessage.length, 3);
+  assert.equal(chromeMock.calls.runtime.sendMessage[0].type, "open_side_panel");
+  assert.equal(chromeMock.calls.runtime.sendMessage[0].tabId, 42);
+  assert.equal(chromeMock.calls.runtime.sendMessage[1].type, "PING_SIDEPANEL");
+  assert.equal(chromeMock.calls.runtime.sendMessage[1].targetTabId, 42);
+  assert.equal(chromeMock.calls.runtime.sendMessage[2].type, "NEW_CHAT_SESSION");
+  assert.equal(chromeMock.calls.runtime.sendMessage[2].targetTabId, 42);
+}
+
+async function testNewChatCommandRetriesPingUntilSidePanelIsReady() {
+  const pingAttempts = [];
+  const { chromeMock } = createServiceWorkerHarness({
+    runtimeSendMessageImpl: async payload => {
+      if (payload.type === "PING_SIDEPANEL") {
+        pingAttempts.push(payload);
+        return pingAttempts.length >= 3 ? {
+          success: true,
+          tabId: 42
+        } : {
+          success: false
+        };
+      }
+      return {
+        success: true
+      };
+    }
+  });
+
+  const commandListener = chromeMock.events.commandsOnCommand.listeners[0];
+  await commandListener("new-chat", {
+    id: 42,
+    windowId: 7
+  });
+  await flushMicrotasks();
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.equal(chromeMock.calls.runtime.sendMessage.length, 5);
+  assert.equal(chromeMock.calls.runtime.sendMessage[0].type, "open_side_panel");
+  assert.equal(chromeMock.calls.runtime.sendMessage[1].type, "PING_SIDEPANEL");
+  assert.equal(chromeMock.calls.runtime.sendMessage[2].type, "PING_SIDEPANEL");
+  assert.equal(chromeMock.calls.runtime.sendMessage[3].type, "PING_SIDEPANEL");
+  assert.equal(chromeMock.calls.runtime.sendMessage[4].type, "NEW_CHAT_SESSION");
+  assert.equal(chromeMock.calls.runtime.sendMessage[4].targetTabId, 42);
+}
+
 async function testRegisterCallsInjectedClearUninstallUrlImmediately() {
   let clearCalls = 0;
   createServiceWorkerHarness({
@@ -439,6 +562,10 @@ async function main() {
   await testMessageHandlerReturnsFailurePayloadWhenOpenerRejects();
   await testTabRemovedClosesMatchingDetachedWindowLock();
   await testWindowRemovedClosesHostWindowLocksAndRemovesWindowLock();
+  await testCommandHandlerSendsNewChatRuntimeMessage();
+  await testCommandHandlerResolvesActiveTabWhenChromeOmitsTabArgument();
+  await testNewChatCommandOpensAndPingsSidePanelBeforeSendingMessage();
+  await testNewChatCommandRetriesPingUntilSidePanelIsReady();
   await testRegisterCallsInjectedClearUninstallUrlImmediately();
   await testStartupMaintenanceRunsInjectedCleanupSteps();
   await testInstalledMaintenanceRunsInjectedCleanupSteps();

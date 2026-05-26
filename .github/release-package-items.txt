@@ -37,6 +37,7 @@ detached-window-title.js
 sidepanel-debug-logger.js
 sidepanel-inline-provider.css
 sidepanel-inline-provider.js
+sidepanel-focus-shortcuts.js
 sidepanel.html
 telemetry-disable.js
 theme-init.js

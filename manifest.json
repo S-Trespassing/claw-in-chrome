@@ -13,6 +13,9 @@
         "default": "Ctrl+E",
         "mac": "Command+E"
       }
+    },
+    "new-chat": {
+      "description": "Start new chat"
     }
   },
   "content_scripts": [
@@ -68,7 +71,7 @@
     "unlimitedStorage",
     "downloads"
   ],
-  "version": "1.0.66.8",
+  "version": "1.0.66.9",
   "web_accessible_resources": [
     {
       "matches": ["https://*.claude.ai/*", "https://claude.ai/*"],
