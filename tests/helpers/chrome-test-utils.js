@@ -26,11 +26,14 @@ function createEventMock() {
       return listeners.includes(listener);
     },
     async emit(...args) {
-      const results = [];
+      let lastDefinedResult;
       for (const listener of [...listeners]) {
-        results.push(await listener(...args));
+        const result = await listener(...args);
+        if (result !== undefined) {
+          lastDefinedResult = result;
+        }
       }
-      return results;
+      return lastDefinedResult;
     }
   };
 }
@@ -117,6 +120,7 @@ function createChromeMock(options = {}) {
   const runtimeOnInstalled = createEventMock();
   const runtimeOnStartup = createEventMock();
   const runtimeOnMessage = createEventMock();
+  const commandsOnCommand = createEventMock();
   const alarmsOnAlarm = createEventMock();
   const tabGroupsOnRemoved = createEventMock();
   const windowsOnRemoved = createEventMock();
@@ -134,7 +138,16 @@ function createChromeMock(options = {}) {
       clear: []
     },
     runtime: {
-      setUninstallURL: []
+      setUninstallURL: [],
+      sendMessage: []
+    },
+    sidePanel: {
+      open: [],
+      close: [],
+      setOptions: []
+    },
+    commands: {
+      triggered: []
     },
     windows: {
       remove: [],
@@ -143,7 +156,9 @@ function createChromeMock(options = {}) {
     },
     tabs: {
       update: [],
-      group: []
+      group: [],
+      sendMessage: [],
+      query: []
     }
   };
 
@@ -185,8 +200,31 @@ function createChromeMock(options = {}) {
       getURL(targetPath) {
         return `chrome-extension://${options.runtimeId || "test-extension-id"}/${String(targetPath || "").replace(/^\/+/, "")}`;
       },
+      async sendMessage(payload) {
+        calls.runtime.sendMessage.push(cloneValue(payload));
+        if (typeof options.runtimeSendMessageImpl === "function") {
+          return await options.runtimeSendMessageImpl(cloneValue(payload), calls.runtime.sendMessage.length - 1);
+        }
+        return options.runtimeSendMessageResult !== undefined ? cloneValue(options.runtimeSendMessageResult) : {
+          success: true
+        };
+      },
       async setUninstallURL(url) {
         calls.runtime.setUninstallURL.push(String(url || ""));
+      }
+    },
+    commands: {
+      onCommand: commandsOnCommand
+    },
+    sidePanel: {
+      async open(payload) {
+        calls.sidePanel.open.push(cloneValue(payload));
+      },
+      async close(payload) {
+        calls.sidePanel.close.push(cloneValue(payload));
+      },
+      async setOptions(payload) {
+        calls.sidePanel.setOptions.push(cloneValue(payload));
       }
     },
     storage: {
@@ -248,6 +286,34 @@ function createChromeMock(options = {}) {
           ...cloneValue(payload)
         };
       },
+      async query(queryInfo = {}) {
+        calls.tabs.query.push(cloneValue(queryInfo));
+        const allTabs = Array.from(tabById.values()).map(cloneValue);
+        return allTabs.filter(tab => {
+          if (queryInfo.active !== undefined && Boolean(tab.active) !== Boolean(queryInfo.active)) {
+            return false;
+          }
+          if (queryInfo.currentWindow !== undefined && Boolean(tab.currentWindow) !== Boolean(queryInfo.currentWindow)) {
+            return false;
+          }
+          if (queryInfo.lastFocusedWindow !== undefined && Boolean(tab.lastFocusedWindow) !== Boolean(queryInfo.lastFocusedWindow)) {
+            return false;
+          }
+          if (queryInfo.windowId !== undefined && Number(tab.windowId) !== Number(queryInfo.windowId)) {
+            return false;
+          }
+          return true;
+        });
+      },
+      async sendMessage(tabId, payload) {
+        calls.tabs.sendMessage.push({
+          tabId: Number(tabId),
+          payload: cloneValue(payload)
+        });
+        return options.tabsSendMessageResult !== undefined ? cloneValue(options.tabsSendMessageResult) : {
+          success: true
+        };
+      },
       async group(payload) {
         calls.tabs.group.push(cloneValue(payload));
         return options.groupIdResult || 777;
@@ -263,6 +329,7 @@ function createChromeMock(options = {}) {
       runtimeOnInstalled,
       runtimeOnStartup,
       runtimeOnMessage,
+      commandsOnCommand,
       alarmsOnAlarm,
       tabGroupsOnRemoved,
       windowsOnRemoved,

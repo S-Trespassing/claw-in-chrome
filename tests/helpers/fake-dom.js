@@ -212,20 +212,71 @@ class FakeElement {
     if (normalized.includes(",")) {
       return normalized.split(",").some(part => this._matchesSelector(part));
     }
+    const descendantParts = normalized.split(/\s+/).filter(Boolean);
+    if (descendantParts.length > 1) {
+      const ownSelector = descendantParts[descendantParts.length - 1];
+      if (!this._matchesSelector(ownSelector)) {
+        return false;
+      }
+      let currentAncestor = this.parentNode instanceof FakeElement ? this.parentNode : null;
+      for (let index = descendantParts.length - 2; index >= 0; index -= 1) {
+        const ancestorSelector = descendantParts[index];
+        let matchedAncestor = null;
+        while (currentAncestor) {
+          if (currentAncestor._matchesSelector(ancestorSelector)) {
+            matchedAncestor = currentAncestor;
+            currentAncestor = currentAncestor.parentNode instanceof FakeElement ? currentAncestor.parentNode : null;
+            break;
+          }
+          currentAncestor = currentAncestor.parentNode instanceof FakeElement ? currentAncestor.parentNode : null;
+        }
+        if (!matchedAncestor) {
+          return false;
+        }
+      }
+      return true;
+    }
     if (normalized.startsWith("#")) {
       return this.id === normalized.slice(1);
     }
-    const attrMatch = normalized.match(/^\[([^=\]]+)(?:=['"]?([^'"\]]+)['"]?)?\]$/);
-    if (attrMatch) {
-      const attrName = attrMatch[1];
-      const expectedValue = attrMatch[2];
-      if (!Object.prototype.hasOwnProperty.call(this.attributes, attrName)) {
+    const tagWithAttrMatch = normalized.match(/^([a-zA-Z0-9_-]+)?((?:\[[^\]]+\])+)$|^([a-zA-Z0-9_-]+)$/);
+    if (tagWithAttrMatch) {
+      const tagName = tagWithAttrMatch[1] || tagWithAttrMatch[3] || "";
+      if (tagName && this.tagName !== tagName.toUpperCase()) {
         return false;
       }
-      return expectedValue == null ? true : this.attributes[attrName] === expectedValue;
+      const attributeGroup = tagWithAttrMatch[2] || "";
+      if (!attributeGroup) {
+        return true;
+      }
+      const attributeSegments = attributeGroup.match(/\[[^\]]+\]/g) || [];
+      return attributeSegments.every(segment => {
+        const attrMatch = segment.match(/^\[([^=\]~*]+)([*]?=)?['"]?([^'"\]]*)['"]?\]$/);
+        if (!attrMatch) {
+          return false;
+        }
+        const attrName = String(attrMatch[1] || "").trim();
+        const operator = attrMatch[2] || "";
+        const expectedValue = attrMatch[3];
+        if (!Object.prototype.hasOwnProperty.call(this.attributes, attrName)) {
+          return false;
+        }
+        if (!operator) {
+          return true;
+        }
+        const actualValue = String(this.attributes[attrName] || "");
+        if (operator === "=") {
+          return actualValue === expectedValue;
+        }
+        if (operator === "*=") {
+          return actualValue.includes(expectedValue);
+        }
+        return false;
+      });
     }
     return this.tagName === normalized.toUpperCase();
   }
+
 
   closest(selector) {
     let current = this;

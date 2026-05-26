@@ -98093,6 +98093,7 @@ function o1() {
       const __cpSidepanelRuntimeMessageTypeStopAgent = __cpSidepanelContractMessages?.STOP_AGENT ?? "STOP_AGENT";
       const __cpSidepanelRuntimeMessageTypeExecuteTask = __cpSidepanelContractMessages?.EXECUTE_TASK ?? "EXECUTE_TASK";
       const __cpSidepanelRuntimeMessageTypePopulateInputText = __cpSidepanelContractMessages?.POPULATE_INPUT_TEXT ?? "POPULATE_INPUT_TEXT";
+      const __cpSidepanelRuntimeMessageTypeNewChatSession = "NEW_CHAT_SESSION";
       const __cpSidepanelQueryKeyMode = "mode";
       const __cpSidepanelQueryModeWindow = "window";
       const __cpSidepanelQueryKeySessionId = "sessionId";
@@ -98122,6 +98123,30 @@ function o1() {
             return true;
           }
           return false;
+        }
+        if (a.type === __cpSidepanelRuntimeMessageTypeNewChatSession) {
+          const t = typeof a.targetTabId == "number" ? a.targetTabId : null;
+          if (t && e && e !== t) {
+            return false;
+          }
+          const n = [
+            'button[aria-label="New chat"]',
+            'button[aria-label="New session"]',
+            'button[aria-label="新建会话"]',
+            'button[aria-label="新会话"]',
+            'button[title="New chat"]',
+            'button[title="New session"]',
+            'button[title="新建会话"]',
+            'button[title="新会话"]'
+          ];
+          const s = n.map(e => document.querySelector(e)).find(Boolean);
+          if (s && typeof s.click === "function") {
+            s.click();
+          }
+          g({
+            success: true
+          });
+          return true;
         }
         if (a.type === __cpSidepanelRuntimeMessageTypeStopAgent) {
           // 语义锚点：STOP_AGENT 先按 targetTabId 过滤；只有命中当前 tab 的 sidepanel 才会走 cancel + permission deny 收口。
